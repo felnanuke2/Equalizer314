@@ -57,7 +57,13 @@ class SpleeterStream private constructor(
         fun open(vocalsPath: String, accompanimentPath: String, threads: Int): SpleeterStream {
             val env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(threads)
+                try {
+                    addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                    addConfigEntry("session.intra_op.allow_spinning", "0")
+                    setIntraOpNumThreads(1)
+                } catch (t: Throwable) {
+                    setIntraOpNumThreads(threads)
+                }
                 setInterOpNumThreads(1)
             }
             try {

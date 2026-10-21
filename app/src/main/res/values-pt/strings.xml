@@ -388,6 +388,8 @@
     <string name="pipeline_input_desc">Áudio do sistema na sessão 0 — entrada da cadeia de efeitos</string>
     <string name="dynamics_processing_card">Processamento dinâmico</string>
     <string name="pipeline_dp_desc">Cadeia principal de processamento para EQ, MBC e limitador</string>
+    <string name="bass_mode">Modo de graves</string>
+    <string name="pipeline_bass_desc">Reforço de graves em um toque, sobreposto ao equalizador</string>
     <string name="pipeline_output_desc">Alto-falantes, fones ou outra saída conectada</string>
     <string name="priority">Prioridade</string>
     <string name="not_priority">Sem prioridade</string>

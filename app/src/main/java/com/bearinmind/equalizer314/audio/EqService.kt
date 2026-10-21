@@ -78,6 +78,8 @@ class EqService : Service() {
         const val ACTION_APPLY_ROUTING_MODE = "com.bearinmind.equalizer314.APPLY_ROUTING_MODE"
         /** Reverb prefs changed — push to every attached per-session reverb. */
         const val ACTION_APPLY_REVERB = "com.bearinmind.equalizer314.APPLY_REVERB"
+        /** Bass Mode toggled — re-layer the bass shelf onto the live EQ(s). */
+        const val ACTION_APPLY_BASS_MODE = "com.bearinmind.equalizer314.APPLY_BASS_MODE"
         /** PlaybackListenerService result bundle: package → int[] session IDs. */
         const val ACTION_PLAYBACK_DETECTED = "com.bearinmind.equalizer314.PLAYBACK_DETECTED"
         const val EXTRA_DETECTED_BUNDLE = "detected_bundle"
@@ -493,6 +495,7 @@ class EqService : Service() {
             DynamicsProcessingManager.frameDurationMs = p.getDpFrameMs()
             DynamicsProcessingManager.interleaveEnabled = p.getDpInterleave()
             DynamicsProcessingManager.compatMode = p.getDpCompatMode()
+            syncBassModeOverlay(p)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
@@ -642,22 +645,17 @@ class EqService : Service() {
             }
             ACTION_APPLY_PERSISTED_EQ -> {
                 if (dynamicsManager.isActive) {
-                    loadPersistedParametricEq()?.let { eq ->
-                        val p = EqPreferencesManager(this)
-                        // "bands" holds the selected channel — never push it to both while CSE is on.
-                        val cse = loadChannelSideEqs(p)
-                        if (cse != null) {
-                            // CSE keeps the preamp per side on the channel gains, not the shared stage.
-                            dynamicsManager.preampGainDb = 0f
-                            dynamicsManager.leftChannelGainDb = p.getLeftChannelGainDb() + p.getPreampLeft()
-                            dynamicsManager.rightChannelGainDb = p.getRightChannelGainDb() + p.getPreampRight()
-                            dynamicsManager.updateFromEqualizers(cse.first, cse.second)
-                        } else {
-                            dynamicsManager.preampGainDb = p.getPreampGain()
-                            dynamicsManager.updateFromEqualizer(eq)
-                        }
-                    }
+                    pushPersistedEqToLiveDp()
                 }
+                return START_STICKY
+            }
+            ACTION_APPLY_BASS_MODE -> {
+                if (!safeStartForeground()) return START_NOT_STICKY
+                val p = EqPreferencesManager(this)
+                syncBassModeOverlay(p)
+                // Session mode: per-session DPs bake the EQ at attach — rebuild them all.
+                if (p.getAudioRoutingMode() == 1) sessionEffects?.onRoutingModeChanged()
+                if (dynamicsManager.isActive) pushPersistedEqToLiveDp()
                 return START_STICKY
             }
             ACTION_RELOAD_PREFS -> {
@@ -1142,6 +1140,83 @@ class EqService : Service() {
         com.bearinmind.equalizer314.dsp.ParametricToDpConverter.overlayEq =
             if (p.restoreSharedBands(shared) && shared.getBandCount() > 0) shared else null
         return Pair(left, right)
+    }
+
+    /** Layer/unlayer the Bass Mode shelf onto every EQ conversion (global + per-session). */
+    private fun syncBassModeOverlay(p: EqPreferencesManager) {
+        val on = p.getBassModeEnabled()
+        val intensity = com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity
+            .values()[p.getBassModeIntensity()]
+        com.bearinmind.equalizer314.dsp.ParametricToDpConverter.bassBoostEq =
+            if (on) com.bearinmind.equalizer314.dsp.ParametricToDpConverter.bassModeCurve(intensity) else null
+        Log.d(TAG, "Bass Mode overlay ${if (on) "on ($intensity soft-sub curve)" else "off"}")
+        syncBassSustain(p)
+    }
+
+    /** Bass Mode "Sustain": swap the low MBC band for a slow-release
+     *  compressor while Bass Mode + Sustain are both on — the time-domain
+     *  half of "soft subbass" (the EQ curve alone can't prolong note
+     *  decay). Pref-layer overlay with a full backup/restore of the user's
+     *  MBC config; power-on and session mode read the same prefs, so they
+     *  pick the state up automatically. Live DP: a band-count change
+     *  needs a reattach; otherwise a plain band re-apply. */
+    private fun syncBassSustain(p: EqPreferencesManager) {
+        val want = p.getBassModeEnabled() && p.getBassSustainEnabled()
+        val active = p.getBassSustainMbcActive()
+        if (want != active) {
+            if (want) {
+                // Keep an existing backup (crash between backup and restore
+                // must not lose the user's config to a second snapshot).
+                if (p.getMbcPrefsBackup() == null) p.backupMbcPrefs(p.snapshotMbcPrefs())
+                p.saveMbcEnabled(true)
+                p.saveMbcBandCount(2)
+                p.saveMbcCrossover(0, 120f)
+                // Sustain compressor: fast-ish attack tames the hit (soft
+                // entry), 700 ms release holds gain through the note decay
+                // (prolonged), gentle ratio + wide knee keep it smooth,
+                // postGain makes up the lost loudness.
+                p.saveMbcBand(0, true, 120f, 15f, 700f, 2.5f, -21f, 12f, -90f, 1f, 0f, 2.5f, -12f)
+                p.saveMbcBand(1, false, 120f, 1f, 100f, 2f, 0f, 8f, -60f, 1f, 0f, 0f, -12f)
+                p.setBassSustainMbcActive(true)
+                Log.d(TAG, "Bass Sustain ON: low MBC band swapped (2 bands, xover 120 Hz)")
+            } else {
+                p.getMbcPrefsBackup()?.let { p.restoreMbcPrefs(it) }
+                p.clearMbcPrefsBackup()
+                p.setBassSustainMbcActive(false)
+                Log.d(TAG, "Bass Sustain OFF: user MBC config restored")
+            }
+        }
+        // Live apply (no-op before the DP is started; power-on pushes prefs itself).
+        val dm = dynamicsManager
+        if (!dm.isActive) return
+        val mbcOn = p.getMbcEnabled()
+        dm.mbcEnabled = mbcOn
+        dm.mbcBandCount = p.getMbcBandCount()
+        if (mbcOn && dm.liveMbcBandCount != dm.mbcBandCount) {
+            dm.reattachActive()
+        } else if (!mbcOn) {
+            dm.writeMbcPassthrough()
+        }
+        applyPersistedMbcConfig()
+    }
+
+    /** Push the persisted EQ (with CSE handling) into the live DP — shared by the persisted-EQ and bass-mode re-apply paths. */
+    private fun pushPersistedEqToLiveDp() {
+        loadPersistedParametricEq()?.let { eq ->
+            val p = EqPreferencesManager(this)
+            // "bands" holds the selected channel — never push it to both while CSE is on.
+            val cse = loadChannelSideEqs(p)
+            if (cse != null) {
+                // CSE keeps the preamp per side on the channel gains, not the shared stage.
+                dynamicsManager.preampGainDb = 0f
+                dynamicsManager.leftChannelGainDb = p.getLeftChannelGainDb() + p.getPreampLeft()
+                dynamicsManager.rightChannelGainDb = p.getRightChannelGainDb() + p.getPreampRight()
+                dynamicsManager.updateFromEqualizers(cse.first, cse.second)
+            } else {
+                dynamicsManager.preampGainDb = p.getPreampGain()
+                dynamicsManager.updateFromEqualizer(eq)
+            }
+        }
     }
 
     private fun loadPersistedParametricEq(): ParametricEqualizer? {

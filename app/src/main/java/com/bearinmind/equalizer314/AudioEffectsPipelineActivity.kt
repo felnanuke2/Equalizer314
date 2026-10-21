@@ -39,6 +39,10 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
             R.string.pipeline_dp_desc,
             canToggle = false
         ),
+        BASS_MODE(
+            R.string.bass_mode,
+            R.string.pipeline_bass_desc
+        ),
         ENVIRONMENTAL_REVERB(
             R.string.environmental_reverb,
             0
@@ -93,10 +97,17 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
                 val newState = !(enabledMap[effect] ?: false)
                 enabledMap[effect] = newState
                 eqPrefs.setAudioEffectEnabled(effect.name, newState)
-                if (effect == EffectId.ENVIRONMENTAL_REVERB) {
-                    // Let the service attach/release per-session reverbs to match the new toggle state
+                // Effects the service must hear about immediately get a re-apply ping.
+                val reapplyAction = when (effect) {
+                    EffectId.ENVIRONMENTAL_REVERB ->
+                        com.bearinmind.equalizer314.audio.EqService.ACTION_APPLY_REVERB
+                    EffectId.BASS_MODE ->
+                        com.bearinmind.equalizer314.audio.EqService.ACTION_APPLY_BASS_MODE
+                    else -> null
+                }
+                if (reapplyAction != null) {
                     val intent = android.content.Intent(this, com.bearinmind.equalizer314.audio.EqService::class.java)
-                        .setAction(com.bearinmind.equalizer314.audio.EqService.ACTION_APPLY_REVERB)
+                        .setAction(reapplyAction)
                     try {
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                             startForegroundService(intent)
@@ -112,6 +123,7 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
                 when (effect) {
                     EffectId.AUDIO_OUTPUT -> currentAudioOutputDescription() ?: getString(effect.descriptionRes)
                     EffectId.AUDIO_INPUT -> currentChannelInputDescription()
+                    EffectId.BASS_MODE -> bassModeDescription()
                     else -> if (effect.descriptionRes != 0) getString(effect.descriptionRes) else ""
                 }
             },
@@ -211,6 +223,10 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
                 startActivity(android.content.Intent(this, EnvironmentalReverbActivity::class.java))
                 overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
             }
+            EffectId.BASS_MODE -> {
+                startActivity(android.content.Intent(this, BassModeActivity::class.java))
+                overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+            }
             EffectId.AUDIO_OUTPUT -> {
                 startActivity(android.content.Intent(this, AudioOutputActivity::class.java))
                 overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
@@ -231,12 +247,18 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Re-bind the Audio Output + Channel Input cards so descriptions pick up changes made while
-        // away (current routed device / current routing mode).
+        // away (current routed device / current routing mode). Bass Mode too — its preset/intensity
+        // can change on the detail page.
         if (::adapter.isInitialized) {
-            val outPos = items.indexOf(EffectId.AUDIO_OUTPUT)
-            if (outPos >= 0) adapter.notifyItemChanged(outPos)
-            val inPos = items.indexOf(EffectId.AUDIO_INPUT)
-            if (inPos >= 0) adapter.notifyItemChanged(inPos)
+            // Re-hydrate enable flags: Bass Mode can be toggled on its detail
+            // page while this screen sits underneath.
+            for (id in EffectId.values()) {
+                enabledMap[id] = eqPrefs.isAudioEffectEnabled(id.name)
+            }
+            for (id in listOf(EffectId.AUDIO_OUTPUT, EffectId.AUDIO_INPUT, EffectId.BASS_MODE)) {
+                val pos = items.indexOf(id)
+                if (pos >= 0) adapter.notifyItemChanged(pos)
+            }
         }
     }
 
@@ -296,6 +318,20 @@ class AudioEffectsPipelineActivity : AppCompatActivity() {
                 start()
             }
         }
+    }
+
+    /** Bass Mode card description: preset name while on, generic line while off. */
+    private fun bassModeDescription(): String {
+        if (!eqPrefs.getBassModeEnabled()) return getString(R.string.pipeline_bass_desc)
+        val level = com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity
+            .values()[eqPrefs.getBassModeIntensity()]
+        val label = when (level) {
+            com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity.SUBTLE -> getString(R.string.bass_preset_subtle)
+            com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity.BALANCED -> getString(R.string.bass_preset_balanced)
+            com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity.DEEP -> getString(R.string.bass_preset_deep)
+            com.bearinmind.equalizer314.dsp.ParametricToDpConverter.BassIntensity.MAX -> getString(R.string.bass_preset_max)
+        }
+        return label
     }
 
     /** User-facing Channel Input label from the routing-mode pref (0 = System-wide, 1 = Session-based); matches ChannelInputActivity's chips. */

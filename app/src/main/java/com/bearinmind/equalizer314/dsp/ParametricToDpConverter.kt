@@ -43,11 +43,49 @@ object ParametricToDpConverter {
      *  channel curve + overlay curve. Set by EqStateManager while Channel
      *  Side EQ is on; null otherwise. */
     var overlayEq: ParametricEqualizer? = null
+    /** Bass Mode overlay: a JBL-style low-shelf boost ADDED on top of every
+     *  converted EQ (rides [overlayEq] the same way, the two sum). Owned by
+     *  EqService from the BASS_MODE pipeline toggle; null while off. */
+    @Volatile
+    var bassBoostEq: ParametricEqualizer? = null
+
+    /** Bass Mode intensity presets: scale the soft-sub curve's boost while
+     *  keeping its shape (subsonic guard + midbass tuck) so every level
+     *  stays "soft". Ordinals are persisted (EqPreferencesManager) —
+     *  append new levels at the END only, never insert/reorder. */
+    enum class BassIntensity(val scale: Float) {
+        SUBTLE(0.55f),
+        BALANCED(1.0f),
+        DEEP(1.3f),
+        MAX(1.6f),
+    }
+
+    /** The Bass Mode curve: "very soft subbass" tuned for a Bluetooth
+     *  speaker with a 6.5" woofer. Such a driver has real output from
+     *  ~50 Hz up but unloads below its tuning (~45 Hz) — boost there only
+     *  buys excursion and distortion. Design: a 1st-order subsonic guard
+     *  under the tuning, a low-Q sub bell + gentle shelf centred where the
+     *  woofer actually delivers (~60-90 Hz), and a small midbass tuck at
+     *  ~190 Hz — that 150-250 Hz region is what makes bass read as
+     *  "hard/punchy" instead of soft, so it stays near flat. */
+    fun bassModeCurve(
+        intensity: BassIntensity = BassIntensity.BALANCED,
+    ): ParametricEqualizer = ParametricEqualizer().apply {
+        clearBands()
+        addBand(42f, 0f, BiquadFilter.FilterType.HIGH_PASS_1)      // subsonic guard, 6 dB/oct
+        addBand(58f, 4f * intensity.scale, BiquadFilter.FilterType.BELL, 0.7)   // expressive sub core
+        addBand(90f, 7f * intensity.scale, BiquadFilter.FilterType.LOW_SHELF, 0.6) // strong sub tilt
+        addBand(190f, -1.5f * intensity.scale, BiquadFilter.FilterType.BELL, 0.7)   // midbass tuck = soft
+        isEnabled = true
+    }
 
     private fun respond(eq: ParametricEqualizer, f: Float): Float {
-        val base = eq.getFrequencyResponse(f)
+        var db = eq.getFrequencyResponse(f)
         val ov = overlayEq
-        return if (ov != null && ov !== eq) base + ov.getFrequencyResponse(f) else base
+        if (ov != null && ov !== eq) db += ov.getFrequencyResponse(f)
+        val bass = bassBoostEq
+        if (bass != null && bass !== eq) db += bass.getFrequencyResponse(f)
+        return db
     }
     var frameDurationMs: Float = 40f   // mirrors DynamicsProcessingManager.FRAME_DURATION_MS
 
@@ -374,6 +412,13 @@ object ParametricToDpConverter {
         overlayEq?.takeIf { it !== eq }?.let { ov ->
             for (i in 0 until ov.getBandCount()) {
                 val band = ov.getBand(i) ?: continue
+                if (!band.enabled) continue
+                if (band.frequency in MIN_FREQ..MAX_FREQ) anchors.add(band.frequency)
+            }
+        }
+        bassBoostEq?.takeIf { it !== eq }?.let { bass ->
+            for (i in 0 until bass.getBandCount()) {
+                val band = bass.getBand(i) ?: continue
                 if (!band.enabled) continue
                 if (band.frequency in MIN_FREQ..MAX_FREQ) anchors.add(band.frequency)
             }

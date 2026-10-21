@@ -11,6 +11,7 @@ import android.view.View
 import com.bearinmind.equalizer314.EqUiMode
 import com.bearinmind.equalizer314.dsp.BiquadFilter
 import com.bearinmind.equalizer314.dsp.ParametricEqualizer
+import com.bearinmind.equalizer314.dsp.ParametricToDpConverter
 import com.bearinmind.equalizer314.dsp.SpectrumAnalyzer
 import kotlin.math.abs
 import kotlin.math.log10
@@ -705,7 +706,8 @@ class EqGraphView @JvmOverloads constructor(
             val x = graphWidth * i / (numSamples - 1)
             val logFreq = logMin + (x / graphWidth) * (logMax - logMin)
             val freq = 10f.pow(logFreq)
-            val db = ghost.getFrequencyResponse(freq) + (overlayEq?.getFrequencyResponse(freq) ?: 0f)
+            val db = ghost.getFrequencyResponse(freq) + (overlayEq?.getFrequencyResponse(freq) ?: 0f) +
+                (ParametricToDpConverter.bassBoostEq?.takeIf { it !== ghost }?.getFrequencyResponse(freq) ?: 0f)
             if (db.isNaN() || db.isInfinite()) continue
             val y = vPad + graphHeight * (1f - (db - minGain) / (maxGain - minGain))
             if (!started) { path.moveTo(x, y); started = true } else path.lineTo(x, y)
@@ -764,7 +766,8 @@ class EqGraphView @JvmOverloads constructor(
             val freq = 10f.pow(logFreq)
 
             val ov = overlayEq
-            val overlayDb = if (ov != null && ov !== eq) ov.getFrequencyResponse(freq) else 0f
+            val overlayDb = (if (ov != null && ov !== eq) ov.getFrequencyResponse(freq) else 0f) +
+                (ParametricToDpConverter.bassBoostEq?.takeIf { it !== eq }?.getFrequencyResponse(freq) ?: 0f)
             val responsedB = eq.getFrequencyResponse(freq) + overlayDb
             val saturatedDb = eq.getFrequencyResponseWithSaturation(freq) + overlayDb
 

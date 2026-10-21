@@ -388,6 +388,8 @@
 <string name="pipeline_input_desc">会话 0 的系统音频 — 效果链的输入</string>
 <string name="dynamics_processing_card">动态处理</string>
 <string name="pipeline_dp_desc">用于 EQ、MBC 和限制的主要音频处理链</string>
+<string name="bass_mode">低音模式</string>
+<string name="pipeline_bass_desc">一键低架低音增强，叠加在 EQ 之上</string>
 <string name="pipeline_output_desc">扬声器、耳机或其他连接的输出</string>
 <string name="priority">优先级</string>
 <string name="not_priority">非优先级</string>

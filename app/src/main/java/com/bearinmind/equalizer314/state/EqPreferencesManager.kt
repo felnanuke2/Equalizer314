@@ -25,6 +25,9 @@ class EqPreferencesManager(context: Context) {
     data class Binding(val key: String, val label: String, val presetName: String)
 
     companion object {
+        /** Pipeline effect id for Bass Mode — the AudioEffectsPipelineActivity card's enum name. */
+        const val BASS_MODE_EFFECT_NAME = "BASS_MODE"
+
         /** EQ from a saved/preset band array; starts empty, as ParametricEqualizer() seeds 4 flat "phantom" bands. */
         fun eqFromBands(
             arr: JSONArray,
@@ -500,6 +503,69 @@ class EqPreferencesManager(context: Context) {
         prefs.getBoolean("audioEffectEnabled_$id", false)
     fun setAudioEffectEnabled(id: String, enabled: Boolean) {
         prefs.edit().putBoolean("audioEffectEnabled_$id", enabled).apply()
+    }
+
+    // Bass Mode — the pipeline card's BASS_MODE toggle, on the same generic key.
+    fun getBassModeEnabled(): Boolean = isAudioEffectEnabled(BASS_MODE_EFFECT_NAME)
+    fun setBassModeEnabled(enabled: Boolean) = setAudioEffectEnabled(BASS_MODE_EFFECT_NAME, enabled)
+
+    /** Bass Mode intensity preset ordinal (ParametricToDpConverter.BassIntensity).
+     *  Default 1 = BALANCED. Upper bound 3 = MAX — keep in sync if levels are
+     *  appended (append-only; ordinals are persisted). */
+    fun getBassModeIntensity(): Int = prefs.getInt("bassModeIntensity", 1).coerceIn(0, 3)
+    fun setBassModeIntensity(level: Int) {
+        prefs.edit().putInt("bassModeIntensity", level.coerceIn(0, 3)).apply()
+    }
+
+    // ---- Bass Sustain: while Bass Mode + this are on, EqService swaps the
+    // low MBC band for a slow-release compressor (prolonged, soft bass).
+    // Implemented as a pref-layer overlay: the user's whole MBC config is
+    // snapshotted to bassSustainMbcBackup before the swap and restored on
+    // disable — every consumer (power-on, session mode, MbcActivity) reads
+    // these same prefs, so the state stays consistent everywhere.
+    fun getBassSustainEnabled(): Boolean = prefs.getBoolean("bassSustainEnabled", false)
+    fun setBassSustainEnabled(enabled: Boolean) { prefs.edit().putBoolean("bassSustainEnabled", enabled).apply() }
+
+    /** True while the mbc* prefs hold the sustain overlay (not the user's config). */
+    fun getBassSustainMbcActive(): Boolean = prefs.getBoolean("bassSustainMbcActive", false)
+    fun setBassSustainMbcActive(active: Boolean) { prefs.edit().putBoolean("bassSustainMbcActive", active).apply() }
+
+    /** Snapshot every mbc* pref (mbcEnabled, mbcBandCount, mbc_N_*, mbc_crossover_N) as JSON. */
+    fun backupMbcPrefs(json: String) { prefs.edit().putString("bassSustainMbcBackup", json).apply() }
+    fun getMbcPrefsBackup(): String? = prefs.getString("bassSustainMbcBackup", null)
+    fun clearMbcPrefsBackup() { prefs.edit().remove("bassSustainMbcBackup").apply() }
+
+    /** Current mbc* prefs serialized for [backupMbcPrefs]. */
+    fun snapshotMbcPrefs(): String {
+        val obj = org.json.JSONObject()
+        for ((key, value) in prefs.all) {
+            if (!key.startsWith("mbc")) continue
+            when (value) {
+                is Boolean -> obj.put(key, value)
+                is Int -> obj.put(key, value)
+                is Float -> obj.put(key, value.toDouble())
+                is Long -> obj.put(key, value)
+                is String -> obj.put(key, value)
+            }
+        }
+        return obj.toString()
+    }
+
+    /** Remove every mbc* pref, then write the [snapshotMbcPrefs] blob back. */
+    fun restoreMbcPrefs(json: String) {
+        val obj = org.json.JSONObject(json)
+        val editor = prefs.edit()
+        for (key in prefs.all.keys) if (key.startsWith("mbc")) editor.remove(key)
+        for (key in obj.keys()) {
+            when (val v = obj.get(key)) {
+                is Boolean -> editor.putBoolean(key, v)
+                is Int -> editor.putInt(key, v)
+                is Long -> editor.putLong(key, v)
+                is Double -> editor.putFloat(key, v.toFloat())
+                is String -> editor.putString(key, v)
+            }
+        }
+        editor.apply()
     }
 
     // ---- Environmental Reverb: UI units are dB/per-mille; API wants mB (×100 on attach) ----

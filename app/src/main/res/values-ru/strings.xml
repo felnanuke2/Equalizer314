@@ -389,6 +389,8 @@
     <string name="pipeline_input_desc">Системный звук на сессии 0 — вход в цепочку эффектов</string>
     <string name="dynamics_processing_card">Dynamics Processing</string>
     <string name="pipeline_dp_desc">Основная цепочка обработки звука для эквалайзера, компрессора и лимитера</string>
+    <string name="bass_mode">Режим баса</string>
+    <string name="pipeline_bass_desc">Усиление басов в один тап поверх эквалайзера</string>
     <string name="pipeline_output_desc">Динамики, наушники или другой подключённый выход</string>
     <string name="priority">Приоритет</string>
     <string name="not_priority">Без приоритета</string>

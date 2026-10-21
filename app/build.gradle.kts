@@ -100,6 +100,10 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
+    // ONNX Runtime (Karaoke, experimental): runs the Spleeter 2-stems vocal-removal
+    // model (sherpa-onnx fp16 port, MIT) on-device. Apache 2.0, GPL-compatible.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+
     // (Removed unused androidx.media3-exoplayer/ui/session dependencies.
     // They were an artefact of an earlier capture-based design that
     // never shipped. The current implementation uses Android's native
@@ -113,6 +117,12 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+
+    // Opt-in: desktop ONNX Runtime for the real-model SpleeterStream integration test
+    // (run with -PkaraokeTestOrt and KARAOKE_TEST_MODELS pointing at the two .onnx files).
+    if (project.hasProperty("karaokeTestOrt")) {
+        testImplementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
+    }
 }
 
 // F-Droid reproducible builds: disable baseline profile generation. The

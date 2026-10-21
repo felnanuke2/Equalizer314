@@ -26,6 +26,7 @@ class ExperimentalActivity : AppCompatActivity() {
         setupPresetAutosave()
         setupTvMode()
         setupVirtualSurround()
+        setupKaraoke()
 
         // Hide the legacy "Experimental DP Engine" switch row; the view stays so the card structure holds.
         findViewById<android.view.View>(R.id.expDpModeSwitch)
@@ -567,15 +568,21 @@ class ExperimentalActivity : AppCompatActivity() {
     }
 
     private val vsStateReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) = syncVirtualSurround()
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            syncVirtualSurround()
+            syncKaraoke()
+        }
     }
 
     private fun setupVirtualSurround() {
         findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.expVsSwitch)
             .setOnCheckedChangeListener { _, isChecked ->
                 if (vsSyncing) return@setOnCheckedChangeListener
-                if (isChecked) startVirtualSurround()
-                else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                if (isChecked) {
+                    // The two capture pipelines replace each other.
+                    com.bearinmind.equalizer314.audio.KaraokeService.stop(this)
+                    startVirtualSurround()
+                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                     com.bearinmind.equalizer314.audio.VirtualSurroundService.stop(this)
                 }
             }
@@ -833,14 +840,222 @@ class ExperimentalActivity : AppCompatActivity() {
         }.start()
     }
 
+    // ---- Karaoke (experimental): Spleeter vocal removal over captured app audio (KaraokeService) ----
+
+    private var karaokeSyncing = false
+
+    private val karaokeConsent = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == RESULT_OK && data != null &&
+            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+        ) {
+            androidx.core.content.ContextCompat.startForegroundService(
+                this,
+                android.content.Intent(this, com.bearinmind.equalizer314.audio.KaraokeService::class.java)
+                    .setAction(com.bearinmind.equalizer314.audio.KaraokeService.ACTION_START)
+                    .putExtra(com.bearinmind.equalizer314.audio.KaraokeService.EXTRA_RESULT_CODE, result.resultCode)
+                    .putExtra(com.bearinmind.equalizer314.audio.KaraokeService.EXTRA_RESULT_DATA, data)
+            )
+        }
+        syncKaraoke()
+    }
+
+    private val karaokeRecordPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) requestKaraokeConsent() else {
+            vsToast(getString(R.string.karaoke_needs_record_permission))
+            syncKaraoke()
+        }
+    }
+
+    private fun setupKaraoke() {
+        findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.expKaraokeSwitch)
+            .setOnCheckedChangeListener { _, isChecked ->
+                if (karaokeSyncing) return@setOnCheckedChangeListener
+                if (isChecked) {
+                    com.bearinmind.equalizer314.audio.VirtualSurroundService.stop(this)
+                    startKaraoke()
+                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    com.bearinmind.equalizer314.audio.KaraokeService.stop(this)
+                }
+            }
+        syncKaraoke()
+    }
+
+    /** Model first (one-time download with consent), then the record permission, then Android's capture consent; the service starts on consent. */
+    private fun startKaraoke() {
+        val problem = when {
+            android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q -> R.string.karaoke_needs_android_10
+            // Session mode keeps per-app DPs on the very sessions the capture mutes.
+            eqPrefs.getAudioRoutingMode() == 1 -> R.string.karaoke_needs_system_wide
+            else -> null
+        }
+        if (problem != null) {
+            vsToast(getString(problem))
+            syncKaraoke()
+            return
+        }
+        if (!com.bearinmind.equalizer314.audio.karaoke.KaraokeModelStore.downloaded(this)) {
+            showKaraokeDownloadDialog()
+            return
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            karaokeRecordPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+        } else {
+            requestKaraokeConsent()
+        }
+    }
+
+    private fun requestKaraokeConsent() {
+        val mpm = getSystemService(android.media.projection.MediaProjectionManager::class.java) ?: return
+        // Android 14+: preselect the whole device; a single-app share would capture nothing else.
+        val intent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            mpm.createScreenCaptureIntent()
+        }
+        try {
+            karaokeConsent.launch(intent)
+        } catch (_: Exception) {
+            syncKaraoke()
+        }
+    }
+
+    /** One-time ~40 MB model fetch with a progress bar; Cancel aborts (partial files never land). */
+    private fun showKaraokeDownloadDialog() {
+        if (isFinishing) return
+        val density = resources.displayMetrics.density
+        val root = styledDialogRoot()
+        root.addView(styledDialogTitle(getString(R.string.karaoke_download_title)))
+        root.addView(android.widget.TextView(this).apply {
+            text = getString(R.string.karaoke_download_body)
+            setTextColor(0xFFBBBBBB.toInt())
+            textSize = 14f
+            setPadding(0, 0, 0, (12 * density).toInt())
+        })
+        val bar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = false
+            max = 100
+            progress = 0
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        root.addView(bar)
+        val pct = android.widget.TextView(this).apply {
+            text = ""
+            setTextColor(0xFF888888.toInt())
+            textSize = 13f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, (8 * density).toInt(), 0, (8 * density).toInt())
+        }
+        root.addView(pct)
+        root.addView(styledDialogDivider())
+        val btnRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+        }
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val cancelBtn = styledDialogButton(getString(R.string.cancel), isCancel = true).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = (3 * density).toInt()
+            }
+        }
+        val okBtn = styledDialogButton(getString(R.string.download), isCancel = false).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = (3 * density).toInt()
+            }
+        }
+        btnRow.addView(cancelBtn)
+        btnRow.addView(okBtn)
+        root.addView(btnRow)
+
+        val dialog = android.app.AlertDialog.Builder(this, R.style.Theme_Equalizer314_Dialog)
+            .setView(root)
+            .create()
+        okBtn.setOnClickListener {
+            okBtn.isEnabled = false
+            Thread {
+                val result = runCatching {
+                    com.bearinmind.equalizer314.audio.karaoke.KaraokeModelStore.download(this) { p ->
+                        runOnUiThread {
+                            bar.progress = p
+                            pct.text = getString(R.string.karaoke_download_progress, p)
+                        }
+                        !cancelled.get() && !isFinishing
+                    }
+                }
+                runOnUiThread {
+                    if (isFinishing) return@runOnUiThread
+                    dialog.dismiss()
+                    result.onSuccess {
+                        vsToast(getString(R.string.karaoke_download_progress, 100))
+                        startKaraoke()
+                    }.onFailure { e ->
+                        vsToast(getString(R.string.karaoke_download_failed, e.message ?: e.javaClass.simpleName))
+                        syncKaraoke()
+                    }
+                }
+            }.start()
+        }
+        cancelBtn.setOnClickListener {
+            cancelled.set(true)
+            dialog.dismiss()
+            syncKaraoke()
+        }
+        dialog.setOnDismissListener { cancelled.set(true) }
+        dialog.show()
+    }
+
+    private fun syncKaraoke() {
+        val switch = findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.expKaraokeSwitch) ?: return
+        val status = findViewById<android.widget.TextView>(R.id.expKaraokeStatus)
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            switch.isEnabled = false
+            status.text = getString(R.string.karaoke_needs_android_10)
+            return
+        }
+        val svc = com.bearinmind.equalizer314.audio.KaraokeService
+        karaokeSyncing = true
+        switch.isChecked = svc.isRunning
+        karaokeSyncing = false
+        status.text = when (svc.status) {
+            com.bearinmind.equalizer314.audio.KaraokeService.Status.STARTING -> getString(R.string.karaoke_status_starting)
+            com.bearinmind.equalizer314.audio.KaraokeService.Status.RUNNING ->
+                resources.getQuantityString(R.plurals.karaoke_status_running, svc.mutedApps, svc.mutedApps)
+            com.bearinmind.equalizer314.audio.KaraokeService.Status.FAILED -> getString(
+                R.string.karaoke_status_stopped,
+                getString(
+                    when (svc.lastError) {
+                        com.bearinmind.equalizer314.audio.KaraokeService.ERROR_MODEL -> R.string.karaoke_error_model
+                        com.bearinmind.equalizer314.audio.KaraokeService.ERROR_TOO_SLOW -> R.string.karaoke_error_slow
+                        com.bearinmind.equalizer314.audio.KaraokeService.ERROR_REVOKED -> R.string.karaoke_error_revoked
+                        else -> R.string.karaoke_error_capture
+                    }
+                )
+            )
+            // Waiting for an app: the card's note already says how the capture works.
+            com.bearinmind.equalizer314.audio.KaraokeService.Status.OFF,
+            com.bearinmind.equalizer314.audio.KaraokeService.Status.NO_SESSIONS -> ""
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         androidx.core.content.ContextCompat.registerReceiver(
             this, vsStateReceiver,
-            android.content.IntentFilter(com.bearinmind.equalizer314.audio.VirtualSurroundService.ACTION_STATE),
+            android.content.IntentFilter().apply {
+                addAction(com.bearinmind.equalizer314.audio.VirtualSurroundService.ACTION_STATE)
+                addAction(com.bearinmind.equalizer314.audio.KaraokeService.ACTION_STATE)
+            },
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         syncVirtualSurround()
+        syncKaraoke()
     }
 
     override fun onPause() {

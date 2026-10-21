@@ -472,6 +472,30 @@
     <string name="vs_needs_record_permission">Virtual Surround needs the audio recording permission</string>
     <string name="vs_unsupported_file">Can\'t use this file (%1$s)</string>
     <string name="vs_notif_title">Virtual Surround on</string>
+    <!-- Karaoke (Experimental): on-device vocal removal with Spleeter 2-stems -->
+    <string name="karaoke_title">Karaoke</string>
+    <string name="karaoke_desc">Removes vocals from other apps\' audio on the device (Spleeter neural separation). Adds a few seconds of delay and uses noticeable battery.</string>
+    <string name="karaoke_status_starting">Starting…</string>
+    <plurals name="karaoke_status_running">
+        <item quantity="one">vocals removed from %1$d app</item>
+        <item quantity="other">vocals removed from %1$d apps</item>
+    </plurals>
+    <string name="karaoke_note">Works like Virtual Surround (audio capture + muting apps; replaces it while on). First use downloads a ~40 MB model.</string>
+    <string name="karaoke_status_stopped">Stopped: %1$s</string>
+    <string name="karaoke_error_revoked">recording was stopped</string>
+    <string name="karaoke_error_model">the vocal-removal model couldn\'t be loaded</string>
+    <string name="karaoke_error_capture">audio capture failed</string>
+    <string name="karaoke_error_slow">this device is too slow for real-time vocal removal</string>
+    <string name="karaoke_needs_android_10">Karaoke needs Android 10 or newer</string>
+    <string name="karaoke_needs_system_wide">Switch Channel Input to System-wide first</string>
+    <string name="karaoke_needs_record_permission">Karaoke needs the audio recording permission</string>
+    <string name="karaoke_notif_title">Karaoke on</string>
+    <string name="karaoke_notif_text">Vocals removed from playing audio</string>
+    <string name="karaoke_download_title">Download vocal-removal model?</string>
+    <string name="karaoke_download_body">Karaoke needs a one-time ~40 MB download (Spleeter 2-stems model, MIT license). Download it now?</string>
+    <string name="karaoke_download_progress">Downloading… %1$d%%</string>
+    <string name="karaoke_download_failed">Model download failed (%1$s)</string>
+    <string name="download">Download</string>
     <plurals name="n_targets">
         <item quantity="one">%1$d target</item>
         <item quantity="other">%1$d targets</item>

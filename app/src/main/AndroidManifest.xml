@@ -195,6 +195,14 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- Karaoke (Experimental): capture → on-device vocal removal (Spleeter 2-stems
+             via ONNX Runtime) → playback. Same AudioPlaybackCapture pipeline as virtual
+             surround; the two features replace each other when started. -->
+        <service
+            android:name="com.bearinmind.equalizer314.audio.KaraokeService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <!-- Quick Settings tile that toggles global DynamicsProcessing
              on / off without opening MainActivity. Routes through
              EqService.ACTION_START_FROM_TILE and ACTION_STOP. -->

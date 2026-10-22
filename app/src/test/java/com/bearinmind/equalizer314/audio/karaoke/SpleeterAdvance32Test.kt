@@ -68,8 +68,8 @@ class SpleeterAdvance32Test {
         val sep = openStream("KARAOKE_TEST_MODELS_A32") ?: return
         try {
             val inferSec = sep.benchmark()
-            // Step-down needs the device comfortably faster than one 64-frame batch.
-            assumeTrue("device too slow to spare capacity at advance 64", inferSec * 44100.0 <= 0.75 * 64 * KaraokeDsp.HOP)
+            // Step-down needs the pass well under one 64-frame batch (the shrink threshold).
+            assumeTrue("device too slow to spare capacity at advance 64", inferSec * 44100.0 <= 0.35 * 64 * KaraokeDsp.HOP)
             sep.configure(KaraokeDsp.ADVANCE)
             val (input, _) = readFixtures(System.getenv("KARAOKE_TEST_MODELS_A32")!!)
             sep.start()
@@ -81,15 +81,15 @@ class SpleeterAdvance32Test {
         }
     }
 
-    /** Opens the two models from the dir named by [env] (skips the test when unset); caller releases. */
+    /** Opens the model from the dir named by [env] (skips the test when unset); caller releases. */
     private fun openStream(env: String, adaptive: Boolean = true): SpleeterStream? {
         val dir = System.getenv(env) ?: run { assumeTrue("set $env to run", false); return null }
         val d = File(dir)
         assumeTrue(
             "fixtures present",
-            File(d, "vocals.onnx").isFile && File(d, "accompaniment.onnx").isFile && File(d, "test_in.npy").isFile,
+            File(d, "vocals.onnx").isFile && File(d, "test_in.npy").isFile,
         )
-        return SpleeterStream.open(File(d, "vocals.onnx").absolutePath, File(d, "accompaniment.onnx").absolutePath, 1, adaptive)
+        return SpleeterStream.open(File(d, "vocals.onnx").absolutePath, 1, adaptive = adaptive)
     }
 
     private fun readFixtures(dir: String): Pair<Array<FloatArray>, Array<FloatArray>> {

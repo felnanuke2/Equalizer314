@@ -480,7 +480,7 @@
         <item quantity="one">vocals removed from %1$d app</item>
         <item quantity="other">vocals removed from %1$d apps</item>
     </plurals>
-    <string name="karaoke_note">Works like Virtual Surround (audio capture + muting apps; replaces it while on). First use downloads a ~40 MB model.</string>
+    <string name="karaoke_note">Works like Virtual Surround (audio capture + muting apps; replaces it while on). First use downloads a ~20 MB model.</string>
     <string name="karaoke_status_stopped">Stopped: %1$s</string>
     <string name="karaoke_error_revoked">recording was stopped</string>
     <string name="karaoke_error_model">the vocal-removal model couldn\'t be loaded</string>
@@ -492,7 +492,7 @@
     <string name="karaoke_notif_title">Karaoke on</string>
     <string name="karaoke_notif_text">Vocals removed from playing audio</string>
     <string name="karaoke_download_title">Download vocal-removal model?</string>
-    <string name="karaoke_download_body">Karaoke needs a one-time ~40 MB download (Spleeter 2-stems model, MIT license). Download it now?</string>
+    <string name="karaoke_download_body">Karaoke needs a one-time ~20 MB download (Spleeter 2-stems vocals model, MIT license). Download it now?</string>
     <string name="karaoke_download_progress">Downloading… %1$d%%</string>
     <string name="karaoke_download_failed">Model download failed (%1$s)</string>
     <!-- Shizuku (optional, https://shizuku.rikka.app): full session discovery on

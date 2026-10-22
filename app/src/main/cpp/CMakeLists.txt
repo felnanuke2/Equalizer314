@@ -40,3 +40,16 @@ target_link_libraries(eq314hrir m)
 target_link_options(eq314hrir PRIVATE -Wl,--build-id=none)
 # 16 KB page alignment: Android 15+ phones with 16 KB pages can't load a 4 KB-aligned library (NDK r27 defaults to 4 KB).
 target_link_options(eq314hrir PRIVATE -Wl,-z,max-page-size=16384)
+
+# Karaoke separator DSP (STFT/rings/masks/WOLA) for SpleeterStream.kt; pure C + pffft +
+# pthreads, no Android-specific APIs, so the same source builds as a host .dylib/.so for the
+# desktop real-model tests (tools/karaoke/build_host_native.sh).
+add_library(karaoke_jni SHARED
+    karaoke_jni.c
+    $<TARGET_OBJECTS:pffft_simd>
+    $<TARGET_OBJECTS:pffft_c>)
+target_include_directories(karaoke_jni PRIVATE ${SHIM_DIR} ${PW_DIR})
+target_compile_options(karaoke_jni PRIVATE ${DSP_FLAGS})
+target_link_libraries(karaoke_jni m)
+target_link_options(karaoke_jni PRIVATE -Wl,--build-id=none)
+target_link_options(karaoke_jni PRIVATE -Wl,-z,max-page-size=16384)

@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicReference
  * 44.1 kHz so no resampling is needed. A startup benchmark measures the device's inference speed
  * and picks the starting batch size, and the separator adapts that batch at runtime — enlarging
  * it when the device falls behind, shrinking it when there's spare capacity — so the neural
- * separation adds roughly 1–3.5 s of delay (less on fast devices) — fine for singing along,
+ * separation adds roughly 0.5–1.5 s of delay (less on fast devices) — fine for singing along,
  * visible against video.
  */
 @RequiresApi(Build.VERSION_CODES.Q)
@@ -67,7 +67,7 @@ class KaraokeService : Service() {
         private const val CHANNEL_ID = "karaoke_channel"
         private const val NOTIFICATION_ID = 32
         /** The model's rate; both the capture and the replay run at it. */
-        private const val SAMPLE_RATE = 44100
+        private const val SAMPLE_RATE = KaraokeDsp.SAMPLE_RATE
         /** Inference threads for ONNX Runtime; big-core count most phones can spare. */
         private const val INFER_THREADS = 4
         /** Mute-scan heartbeat; playback callbacks trigger faster scans. */
@@ -76,12 +76,13 @@ class KaraokeService : Service() {
         private const val IDLE_PAUSE_MS = 3000
 
         /**
-         * Smallest starting batch advance the device sustains at ≤35% inference load (65%
-         * headroom: the benchmark measures a system that isn't yet playing, EQ-ing and capturing
-         * at the same time); 64 when the benchmark failed. The stream enlarges the batch at
-         * runtime if reality disagrees, and shrinks it back when there's spare capacity.
+         * Smallest starting batch advance the device sustains at ≤70% inference load; 64 when
+         * the benchmark failed. The stream's controller enlarges the batch within two passes
+         * when reality runs slower — well before the output pre-buffer drains — and shrinks it
+         * when there's spare capacity, so starting near the real operating point is safe and
+         * keeps the delay low from the first note instead of shrinking into it seconds later.
          */
-        private const val ADAPTIVE_LOAD = 0.35
+        private const val ADAPTIVE_LOAD = 0.7
         private fun chooseAdvance(inferSec: Double): Int {
             if (inferSec.isInfinite()) return KaraokeDsp.ADVANCE
             for (a in intArrayOf(8, 16, 32, KaraokeDsp.ADVANCE)) {
@@ -204,7 +205,16 @@ class KaraokeService : Service() {
         var track: AudioTrack? = null
         try {
             sep = try {
-                SpleeterStream.open(KaraokeModelStore.vocalsPath(this), KaraokeModelStore.accompanimentPath(this), INFER_THREADS)
+                // Prefer a sideloaded dynamic-window export (halves per-pass compute at 256
+                // frames); a broken sideload falls back to the pinned original rather than
+                // failing karaoke outright.
+                try {
+                    SpleeterStream.open(KaraokeModelStore.modelPath(this), INFER_THREADS, SpleeterStream.MIN_WINDOW)
+                } catch (t: Throwable) {
+                    if (KaraokeModelStore.modelPath(this) == KaraokeModelStore.vocalsPath(this)) throw t
+                    Log.w(TAG, "sideloaded karaoke model failed to load; falling back", t)
+                    SpleeterStream.open(KaraokeModelStore.vocalsPath(this), INFER_THREADS)
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "spleeter model failed to load", t)
                 null
@@ -221,12 +231,15 @@ class KaraokeService : Service() {
             val advance = chooseAdvance(inferSec)
             sep.configure(advance)
             val batchSec = advance.toDouble() * KaraokeDsp.HOP / SAMPLE_RATE
-            // The gap between output bursts is one batch; the extra margin covers inference jitter.
-            val prebufferSec = if (inferSec.isInfinite()) batchSec + 1.0 else batchSec + 0.3 + inferSec / 2
+            // Each output burst carries its own gap's audio, so the pre-buffer doesn't have to
+            // span the gap — only the burst arriving late: inference jitter plus the two
+            // near-budget passes before the controller doubles the batch. 1.25× the pass covers
+            // a pass at ~2× speed in that window; 150 ms covers capture/replay scheduling.
+            val prebufferSec = if (inferSec.isInfinite()) batchSec + 1.0 else 0.15 + inferSec * 1.25
             val prebufferFrames = (prebufferSec * SAMPLE_RATE).toLong()
             Log.i(
-                TAG, if (inferSec.isInfinite()) "benchmark failed; advance $advance, prebuffer ${(prebufferSec * 1000).toInt()} ms"
-                else "inference ${(inferSec * 1000).toInt()} ms/pass -> advance $advance (${(batchSec * 1000).toInt()} ms batches), prebuffer ${(prebufferSec * 1000).toInt()} ms"
+                TAG, if (inferSec.isInfinite()) "benchmark failed; window ${sep.window}, advance $advance, prebuffer ${(prebufferSec * 1000).toInt()} ms"
+                else "inference ${(inferSec * 1000).toInt()} ms/pass, window ${sep.window} -> advance $advance (${(batchSec * 1000).toInt()} ms batches), prebuffer ${(prebufferSec * 1000).toInt()} ms"
             )
             sep.start()
             separator.set(sep)
@@ -235,25 +248,35 @@ class KaraokeService : Service() {
             record = r
             val t = buildTrack(prebufferSec + KaraokeDsp.ADVANCE.toDouble() * KaraokeDsp.HOP / SAMPLE_RATE + 0.3)
             track = t
+            Log.d(TAG, "track buffer ${t.bufferSizeInFrames} frames")
             r.startRecording()
             // Don't play yet: accumulate enough separated audio to survive the gap between
             // inference bursts before starting the output stream.
             var outputFrames = 0L
+            var writtenFrames = 0L
+            var writtenBase = 0L
+            var headBase = 0
+            var lastHead = 0
             var playing = false
             val buf = FloatArray(KaraokeDsp.HOP * 2)
             val out = FloatArray(KaraokeDsp.HOP * 2)
             var silentFrames = 0
             var paused = false
+            var statusTicks = 0
             loop@ while (running) {
                 if (recreateRecord) {
                     // A new exclusion list only applies to a new AudioRecord (same projection).
+                    // Build before the swap: creation takes an AudioFlinger round-trip, and every
+                    // millisecond of the gap leaves the output unfed.
                     recreateRecord = false
+                    val nr = buildRecord(mp)
                     try { r.stop() } catch (_: Throwable) {}
                     r.release()
-                    r = buildRecord(mp)
-                    rec = r
-                    record = r
+                    r = nr
+                    rec = nr
+                    record = nr
                     r.startRecording()
+                    Log.d(TAG, "capture restarted")
                 }
                 val f = sep.failure
                 if (f != null) {
@@ -269,20 +292,43 @@ class KaraokeService : Service() {
                     if (!paused) {
                         t.pause(); t.flush(); sep.reset()
                         paused = true; playing = false; outputFrames = 0
+                        writtenFrames = 0; writtenBase = 0
+                        headBase = t.playbackHeadPosition; lastHead = headBase
+                        Log.d(TAG, "idle pause")
                     }
                     continue
                 }
-                if (paused) paused = false
+                if (paused) {
+                    paused = false
+                    Log.d(TAG, "capture resumed")
+                }
                 sep.push(buf, frames)
                 while (sep.popOutput(out)) {
                     t.write(out, 0, KaraokeDsp.HOP * 2, AudioTrack.WRITE_BLOCKING)
+                    writtenFrames += KaraokeDsp.HOP
                     if (!playing) {
                         outputFrames += KaraokeDsp.HOP
                         if (outputFrames >= prebufferFrames) {
                             t.play()
                             playing = true
+                            headBase = t.playbackHeadPosition; lastHead = headBase
                         }
                     }
+                }
+                if (++statusTicks >= 128) {
+                    statusTicks = 0
+                    // The playback head resets when the native track restarts (flush, underrun
+                    // restore) while writtenFrames doesn't — resync so the fill reads true.
+                    val head = t.playbackHeadPosition
+                    if (head < lastHead) {
+                        writtenBase = writtenFrames
+                        headBase = head
+                    }
+                    lastHead = head
+                    Log.d(
+                        TAG,
+                        "advance ${sep.advanceFrames} frames, lag ${sep.lagFrames}, fill ${writtenFrames - writtenBase - (head - headBase)} frames, underruns ${t.underrunCount}"
+                    )
                 }
             }
         } catch (t: Throwable) {

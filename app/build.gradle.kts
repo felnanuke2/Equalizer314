@@ -34,7 +34,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            // Performance testing without RELEASE_* properties: fall back to the debug keystore
+            // so `installRelease` works locally. CI/F-Droid set the real key.
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
+                ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -129,7 +132,7 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 
     // Opt-in: desktop ONNX Runtime for the real-model SpleeterStream integration test
-    // (run with -PkaraokeTestOrt and KARAOKE_TEST_MODELS pointing at the two .onnx files).
+    // (run with -PkaraokeTestOrt and KARAOKE_TEST_MODELS pointing at the vocals .onnx file).
     if (project.hasProperty("karaokeTestOrt")) {
         testImplementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
     }

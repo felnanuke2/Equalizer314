@@ -14,10 +14,10 @@ import kotlin.math.abs
  * that replays the exact same batching (512-frame windows, 64-frame advance, zero-padded
  * head, bin-1023 mask extension, WOLA emission).
  *
- * Opt-in — needs the two models plus the generated .npy fixtures; set KARAOKE_TEST_MODELS to
- * the directory holding them (vocals.onnx, accompaniment.onnx, test_in.npy, test_ref_out.npy)
- * and run with `-PkaraokeTestOrt` so the desktop ONNX Runtime is on the test classpath.
- * Skipped otherwise: it needs ~39 MB of models and a CPU faster than real time.
+ * Opt-in — needs the model plus the generated .npy fixtures; set KARAOKE_TEST_MODELS to
+ * the directory holding them (vocals.onnx, test_in.npy, test_ref_out.npy) and run with
+ * `-PkaraokeTestOrt` so the desktop ONNX Runtime is on the test classpath.
+ * Skipped otherwise: it needs ~20 MB of model and a CPU faster than real time.
  */
 class SpleeterStreamIntegrationTest {
 
@@ -30,7 +30,7 @@ class SpleeterStreamIntegrationTest {
         val d = File(dir!!)
         assumeTrue(
             "fixtures present",
-            File(d, "vocals.onnx").isFile && File(d, "accompaniment.onnx").isFile &&
+            File(d, "vocals.onnx").isFile &&
                 File(d, "test_in.npy").isFile && File(d, "test_ref_out.npy").isFile,
         )
 
@@ -42,7 +42,7 @@ class SpleeterStreamIntegrationTest {
         // Single inference thread, fixed 64-frame advance (adaptation off): matches the fixture
         // generator's session so both sides see identical ONNX Runtime numerics and batching
         // (production keeps KaraokeService.INFER_THREADS and runtime adaptation).
-        val sep = SpleeterStream.open(File(d, "vocals.onnx").absolutePath, File(d, "accompaniment.onnx").absolutePath, 1, adaptive = false)
+        val sep = SpleeterStream.open(File(d, "vocals.onnx").absolutePath, 1, adaptive = false)
         sep.start()
         val inBuf = FloatArray(hop * 2)
         val outBuf = FloatArray(hop * 2)

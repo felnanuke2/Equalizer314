@@ -1054,6 +1054,12 @@ class ExperimentalActivity : AppCompatActivity() {
             if (requestCode == shizukuRequestCode) syncShizuku()
         }
 
+    private val shizukuBinderReceivedListener =
+        rikka.shizuku.Shizuku.OnBinderReceivedListener { syncShizuku() }
+
+    private val shizukuBinderDeadListener =
+        rikka.shizuku.Shizuku.OnBinderDeadListener { syncShizuku() }
+
     private fun setupShizuku() {
         findViewById<com.google.android.material.button.MaterialButton>(R.id.expShizukuButton)
             .setOnClickListener {
@@ -1077,11 +1083,11 @@ class ExperimentalActivity : AppCompatActivity() {
 
     /** Server up but grant pending → "Allow"; every Shizuku call can throw when its binder dies. */
     private fun shizukuRunning(): Boolean = try {
-        rikka.shizuku.Shizuku.getBinder() != null
+        rikka.shizuku.Shizuku.pingBinder()
     } catch (_: Throwable) { false }
 
     private fun shizukuGranted(): Boolean = try {
-        rikka.shizuku.Shizuku.getBinder() != null &&
+        rikka.shizuku.Shizuku.pingBinder() &&
             rikka.shizuku.Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
     } catch (_: Throwable) { false }
 
@@ -1110,6 +1116,8 @@ class ExperimentalActivity : AppCompatActivity() {
         super.onResume()
         try {
             rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+            rikka.shizuku.Shizuku.addBinderReceivedListenerSticky(shizukuBinderReceivedListener)
+            rikka.shizuku.Shizuku.addBinderDeadListener(shizukuBinderDeadListener)
         } catch (_: Throwable) {}
         androidx.core.content.ContextCompat.registerReceiver(
             this, vsStateReceiver,
@@ -1127,6 +1135,8 @@ class ExperimentalActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         try { rikka.shizuku.Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener) } catch (_: Throwable) {}
+        try { rikka.shizuku.Shizuku.removeBinderReceivedListener(shizukuBinderReceivedListener) } catch (_: Throwable) {}
+        try { rikka.shizuku.Shizuku.removeBinderDeadListener(shizukuBinderDeadListener) } catch (_: Throwable) {}
         try { unregisterReceiver(vsStateReceiver) } catch (_: Exception) {}
         // Leaving with TV Mode armed but nothing connected is accidental — reset to Off; a live link survives.
         val hub = com.bearinmind.equalizer314.remote.TvRemoteHub

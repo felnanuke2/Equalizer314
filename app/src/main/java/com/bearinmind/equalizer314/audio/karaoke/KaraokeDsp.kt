@@ -6,6 +6,8 @@ import kotlin.math.cos
 
 /** Shared STFT geometry for the karaoke separator (Spleeter 2stems model contract). */
 object KaraokeDsp {
+    /** The model's rate; capture, inference and replay all run at it (no resampling). */
+    const val SAMPLE_RATE = 44100
     const val FRAME = 4096
     const val HOP = 1024
     const val BINS = FRAME / 2 + 1

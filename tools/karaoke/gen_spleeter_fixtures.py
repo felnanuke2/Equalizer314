@@ -11,9 +11,11 @@ Model contract (k2-fsa sherpa-onnx fp16 port of Deezer Spleeter 2stems, MIT):
   input  "x" float32 [2, num_splits, 512, 1024] — |unnormalized rFFT| magnitude
          spectrogram, channel-major (ch0=L, ch1=R), 512 STFT frames x 1024 bins.
   output "y" float32 same shape — sigmoid_mask * input magnitude, i.e. per-stem
-         magnitude estimates (NOT raw masks).
-Models are downloaded from the pinned HuggingFace URLs and verified against the
-pinned SHA-256 + byte size when absent from --models-dir.
+         magnitude estimates (NOT raw masks). Only the vocals model is run; the
+         accompaniment magnitude is the residual a = m - v (m = the mixture
+         magnitude, v = the vocals estimate). The model is downloaded from the
+         pinned HuggingFace URL and verified against the pinned SHA-256 + byte
+         size when absent from --models-dir.
 
 STFT: n_fft=4096, hop=1024, 44100 Hz, periodic Hann w[n] = 0.5-0.5*cos(2*pi*n/4096),
 forward unscaled rFFT (numpy rfft convention), inverse scaled by 1/N. Frame f
@@ -24,11 +26,13 @@ Streaming batching (mirrors SpleeterStream.runBatch/applyMasks):
   for target = 0, 64, 128, ...: assemble window rows w = 0..511 from frames
   src = target - 448 + w (rows with src < 0 stay ZERO — zero-padded head);
   magnitude tensor flat index (ch * 512 + w) * 1024 + bin, shape
-  [2, 1, 512, 1024]. Run BOTH models on that window (num_splits=1), then mask
-  ONLY frames [target, target+64) = window rows 448..511 using that frame's own
-  per-channel estimates v (vocals), a (accompaniment): Wiener ratio mask,
-  separation exponent 2, EPSILON 1e-10 (Deezer):
-      mask_a = (a^2 + 5e-11) / (v^2 + a^2 + 1e-10)
+  [2, 1, 512, 1024]. Run ONLY the vocals model on that window (num_splits=1),
+  then mask ONLY frames [target, target+64) = window rows 448..511 using that
+  frame's own per-channel vocals estimate v and mixture magnitude m: the
+  accompaniment is the residual a = m - v, so the Wiener ratio mask with
+  separation exponent 2, EPSILON 1e-10 (Deezer) becomes
+      mask_a = ((m-v)^2 + 5e-11) / (v^2 + (m-v)^2 + 1e-10)
+  (mask_v + mask_a still sums to 1: v^2/(v^2+a^2) + a^2/(v^2+a^2) = 1),
   applied to the full 2049-bin complex spectrum of the mixture frame. Bins
   1024..2048 (above the model's 1024 bins) reuse the row's bin-1023 mask value
   (deliberate deviation from Deezer's mask_extension:"zeros" — keeps the top
@@ -74,11 +78,6 @@ MODELS = {
         "https://huggingface.co/csukuangfj/sherpa-onnx-spleeter-2stems-fp16/resolve/main/vocals.fp16.onnx",
         "24cef84aedcd1fe87c0b743ef3370ad34dc1fabf6c9014d6128a75a538c7b668",
         19681017,
-    ),
-    "accompaniment.onnx": (
-        "https://huggingface.co/csukuangfj/sherpa-onnx-spleeter-2stems-fp16/resolve/main/accompaniment.fp16.onnx",
-        "d14cea55793cc531a5875f5f4da08207d1c5ab9292e8e0099a104eecb014fcc0",
-        19681024,
     ),
 }
 
@@ -185,15 +184,14 @@ def analyze(x):
     return spec_re, spec_im, mags
 
 
-def run_reference(models, spec_re, spec_im, mags):
-    """Replay SpleeterStream's 512/64 batching + WOLA; returns (2, masked*1024)."""
+def run_reference(model_path, spec_re, spec_im, mags):
+    """Replay SpleeterStream's window/advance batching + WOLA; returns (2, masked*1024)."""
     import onnxruntime as ort
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 1  # single-threaded for deterministic outputs
     opts.inter_op_num_threads = 1
-    sess_v = ort.InferenceSession(models["vocals.onnx"], opts, providers=["CPUExecutionProvider"])
-    sess_a = ort.InferenceSession(models["accompaniment.onnx"], opts, providers=["CPUExecutionProvider"])
+    sess_v = ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
     in_name = sess_v.get_inputs()[0].name
 
     frames = mags.shape[1]
@@ -211,13 +209,13 @@ def run_reference(models, spec_re, spec_im, mags):
             net_in[0, 0, w, :] = mags[0, src]
             net_in[1, 0, w, :] = mags[1, src]
         out_v = sess_v.run(None, {in_name: net_in})[0][:, 0]  # (2, WINDOW, MODEL_BINS)
-        out_a = sess_a.run(None, {in_name: net_in})[0][:, 0]
 
         # Mask only frames [target, target+ADVANCE) = window rows LEFT_CONTEXT..WINDOW-1.
         sl = slice(target, target + ADVANCE)
         for ch in range(2):
             v = out_v[ch, LEFT_CONTEXT:WINDOW]  # (64, MODEL_BINS) float32
-            a = out_a[ch, LEFT_CONTEXT:WINDOW]
+            m = mags[ch, sl]
+            a = m - v  # residual accompaniment estimate
             vs = v * v
             asq = a * a
             mask = (asq + EPS / np.float32(2)) / (vs + asq + EPS)
@@ -261,15 +259,22 @@ def run_reference(models, spec_re, spec_im, mags):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--models-dir", required=True, help="dir with/for vocals.onnx + accompaniment.onnx")
+    ap.add_argument("--models-dir", required=True, help="dir with/for vocals.onnx")
     ap.add_argument("--out", required=True, help="output dir for test_in.npy + test_ref_out.npy")
     ap.add_argument("--advance", type=int, default=64,
-                    help="frames masked per inference pass (default 64); LEFT_CONTEXT = 512 - advance. "
+                    help="frames masked per inference pass (default 64); LEFT_CONTEXT = window - advance. "
                     "Used to validate SpleeterStream's variable-advance batching (e.g. 32)")
+    ap.add_argument("--window", type=int, default=512,
+                    help="model input frames per window (default 512; 256 for the dynamic-axis "
+                    "export of shrink_window.py, which the stream then runs at that size)")
+    ap.add_argument("--model", default=None,
+                    help="model file to run the reference with (default: the pinned vocals.onnx); "
+                    "pass the dynamic vocals.dyn.onnx together with --window 256")
     args = ap.parse_args()
 
-    global ADVANCE, LEFT_CONTEXT
+    global ADVANCE, LEFT_CONTEXT, WINDOW
     ADVANCE = args.advance
+    WINDOW = args.window
     LEFT_CONTEXT = WINDOW - ADVANCE
 
     models = ensure_models(args.models_dir)
@@ -282,11 +287,12 @@ def main():
     print(f"test_in.npy: shape {x.shape} float32, peak {np.abs(x).max():.4f}")
 
     spec_re, spec_im, mags = analyze(x)
-    ref, masked_frames = run_reference(models, spec_re, spec_im, mags)
+    model_path = args.model or models["vocals.onnx"]
+    ref, masked_frames = run_reference(model_path, spec_re, spec_im, mags)
     assert ref.dtype == np.float32 and ref.shape == (2, masked_frames * HOP)
     np.save(os.path.join(args.out, "test_ref_out.npy"), ref)
     print(f"test_ref_out.npy: shape {ref.shape} float32 "
-          f"({masked_frames} masked frames of {CLIP_FRAMES} input frames)")
+          f"({masked_frames} masked frames of {CLIP_FRAMES} input frames, window {WINDOW}, advance {ADVANCE}, model {os.path.basename(model_path)})")
 
 
 if __name__ == "__main__":

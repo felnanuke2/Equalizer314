@@ -39,9 +39,10 @@ class SpleeterStreamIntegrationTest {
         val frames = input[0].size / hop
         val maskedFrames = (frames / KaraokeDsp.ADVANCE) * KaraokeDsp.ADVANCE
 
-        // Single inference thread: matches the fixture generator's session so both sides
-        // see identical ONNX Runtime numerics (production keeps KaraokeService.INFER_THREADS).
-        val sep = SpleeterStream.open(File(d, "vocals.onnx").absolutePath, File(d, "accompaniment.onnx").absolutePath, 1)
+        // Single inference thread, fixed 64-frame advance (adaptation off): matches the fixture
+        // generator's session so both sides see identical ONNX Runtime numerics and batching
+        // (production keeps KaraokeService.INFER_THREADS and runtime adaptation).
+        val sep = SpleeterStream.open(File(d, "vocals.onnx").absolutePath, File(d, "accompaniment.onnx").absolutePath, 1, adaptive = false)
         sep.start()
         val inBuf = FloatArray(hop * 2)
         val outBuf = FloatArray(hop * 2)

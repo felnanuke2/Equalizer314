@@ -41,8 +41,11 @@ import java.util.concurrent.atomic.AtomicReference
  * Spleeter 2-stems model (sherpa-onnx fp16 port) and replays the instrumental as plain media so
  * the session-0 EQ still applies; each captured app's own session is muted with a -200 dB
  * DynamicsProcessing, as VirtualSurroundService does. Capture and playback run at the model's
- * 44.1 kHz so no resampling is needed. The neural separation adds roughly 2–3 s of delay —
- * fine for singing along, visible against video.
+ * 44.1 kHz so no resampling is needed. A startup benchmark measures the device's inference speed
+ * and picks the starting batch size, and the separator adapts that batch at runtime — enlarging
+ * it when the device falls behind, shrinking it when there's spare capacity — so the neural
+ * separation adds roughly 1–3.5 s of delay (less on fast devices) — fine for singing along,
+ * visible against video.
  */
 @RequiresApi(Build.VERSION_CODES.Q)
 class KaraokeService : Service() {
@@ -71,8 +74,21 @@ class KaraokeService : Service() {
         private const val SCAN_MS = 2000L
         /** Pause the output after this much captured silence (no idle stream keeping the audio HAL awake). */
         private const val IDLE_PAUSE_MS = 3000
-        /** Seconds of separated audio to accumulate in the AudioTrack before playback starts; keeps the buffer above one inference-burst period so it never underruns. */
-        private const val PREBUFFER_SEC = 3
+
+        /**
+         * Smallest starting batch advance the device sustains at ≤35% inference load (65%
+         * headroom: the benchmark measures a system that isn't yet playing, EQ-ing and capturing
+         * at the same time); 64 when the benchmark failed. The stream enlarges the batch at
+         * runtime if reality disagrees, and shrinks it back when there's spare capacity.
+         */
+        private const val ADAPTIVE_LOAD = 0.35
+        private fun chooseAdvance(inferSec: Double): Int {
+            if (inferSec.isInfinite()) return KaraokeDsp.ADVANCE
+            for (a in intArrayOf(8, 16, 32, KaraokeDsp.ADVANCE)) {
+                if (inferSec * SAMPLE_RATE <= ADAPTIVE_LOAD * a * KaraokeDsp.HOP) return a
+            }
+            return KaraokeDsp.ADVANCE
+        }
         /** Without DUMP: how long one recording check listens, the wait before the next, and checks per app until playback changes. */
         private const val PROBE_MS = 2500L
         private const val PROBE_RETRY_MS = 3000L
@@ -197,17 +213,31 @@ class KaraokeService : Service() {
                 Handler(Looper.getMainLooper()).post { fail(ERROR_MODEL) }
                 return
             }
+            val inferSec = runCatching { sep.benchmark() }.getOrDefault(Double.POSITIVE_INFINITY)
+            if (sep.failure != null) {
+                Handler(Looper.getMainLooper()).post { fail(ERROR_MODEL) }
+                return
+            }
+            val advance = chooseAdvance(inferSec)
+            sep.configure(advance)
+            val batchSec = advance.toDouble() * KaraokeDsp.HOP / SAMPLE_RATE
+            // The gap between output bursts is one batch; the extra margin covers inference jitter.
+            val prebufferSec = if (inferSec.isInfinite()) batchSec + 1.0 else batchSec + 0.3 + inferSec / 2
+            val prebufferFrames = (prebufferSec * SAMPLE_RATE).toLong()
+            Log.i(
+                TAG, if (inferSec.isInfinite()) "benchmark failed; advance $advance, prebuffer ${(prebufferSec * 1000).toInt()} ms"
+                else "inference ${(inferSec * 1000).toInt()} ms/pass -> advance $advance (${(batchSec * 1000).toInt()} ms batches), prebuffer ${(prebufferSec * 1000).toInt()} ms"
+            )
             sep.start()
             separator.set(sep)
             var r = buildRecord(mp)
             rec = r
             record = r
-            val t = buildTrack()
+            val t = buildTrack(prebufferSec + KaraokeDsp.ADVANCE.toDouble() * KaraokeDsp.HOP / SAMPLE_RATE + 0.3)
             track = t
             r.startRecording()
             // Don't play yet: accumulate enough separated audio to survive the gap between
-            // inference bursts (each ≈1.5 s) before starting the output stream.
-            val prebufferFrames = SAMPLE_RATE.toLong() * PREBUFFER_SEC
+            // inference bursts before starting the output stream.
             var outputFrames = 0L
             var playing = false
             val buf = FloatArray(KaraokeDsp.HOP * 2)
@@ -308,9 +338,10 @@ class KaraokeService : Service() {
     }
 
     // Plain media stream (the session-0 EQ processes it), never capturable itself, so it can't feed back into the capture.
-    private fun buildTrack(): AudioTrack {
+    private fun buildTrack(bufferSec: Double): AudioTrack {
         val min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
-        // 4 s: one inference burst is ≈1.5 s; the buffer must absorb the gap between bursts plus inference jitter.
+        // Holds the pre-buffer plus one full-size inference burst with slack: the runtime
+        // adaptation can grow bursts back to ADVANCE frames on an overloaded device.
         return AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -327,7 +358,8 @@ class KaraokeService : Service() {
                     .build()
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(maxOf(min, SAMPLE_RATE * 8 * 4))
+            // Frame-aligned (× 8 bytes stereo float): AudioTrack rejects misaligned byte sizes.
+            .setBufferSizeInBytes(maxOf(min, (bufferSec * SAMPLE_RATE).toInt() * 8))
             .build()
     }
 

@@ -63,7 +63,7 @@ HOP = 1024
 BINS = FRAME // 2 + 1          # 2049
 MODEL_BINS = 1024              # the U-Net only models bins 0..1023
 WINDOW = 512                   # model input frames per window
-ADVANCE = 64                   # frames masked (and emitted) per inference pass
+ADVANCE = 64                   # frames masked (and emitted) per inference pass; override with --advance
 LEFT_CONTEXT = WINDOW - ADVANCE  # 448
 EPS = np.float32(1e-10)
 
@@ -263,7 +263,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models-dir", required=True, help="dir with/for vocals.onnx + accompaniment.onnx")
     ap.add_argument("--out", required=True, help="output dir for test_in.npy + test_ref_out.npy")
+    ap.add_argument("--advance", type=int, default=64,
+                    help="frames masked per inference pass (default 64); LEFT_CONTEXT = 512 - advance. "
+                    "Used to validate SpleeterStream's variable-advance batching (e.g. 32)")
     args = ap.parse_args()
+
+    global ADVANCE, LEFT_CONTEXT
+    ADVANCE = args.advance
+    LEFT_CONTEXT = WINDOW - ADVANCE
 
     models = ensure_models(args.models_dir)
     os.makedirs(args.out, exist_ok=True)

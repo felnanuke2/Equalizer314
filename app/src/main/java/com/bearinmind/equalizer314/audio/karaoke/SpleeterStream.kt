@@ -17,10 +17,18 @@ import kotlin.math.sqrt
  *        a²/(v² + a² + 1e-10) applied to the original complex spectrum (per channel).
  *
  * Streaming: STFT runs on the caller's (audio) thread; a 512-frame window is re-inferred every
- * 64 new frames, masking only the newest 64 (each with 448 frames ≈ 10 s of left context; the
- * stream starts padded with 448 silent frames so the first batch needs no warm-up). Bins above
- * the model's 1024 (~11 kHz) reuse bin 1023's mask instead of the reference's hard zero, so the
- * karaoke output keeps its top octave.
+ * [advance] new frames (64 by default; a startup [benchmark] lets the service tune the starting
+ * point to the device), masking only the newest ones (each with WINDOW-advance frames of left
+ * context; the stream starts padded with WINDOW-advance silent frames so the first batch needs
+ * no warm-up). Bins above the model's 1024 (~11 kHz) reuse bin 1023's mask instead of the
+ * reference's hard zero, so the karaoke output keeps its top octave.
+ *
+ * The inference loop adapts [advance] at runtime (unless opened with adaptive=false): when the
+ * capture runs ahead of the masking (device slower than the batch budget) the batch is enlarged
+ * — up to [KaraokeDsp.ADVANCE], the geometry the lag guard is calibrated for — and after several
+ * fully caught-up passes it is halved again, trimming the playback delay on devices with spare
+ * capacity. A startup benchmark alone can't be trusted: it measures a cold, unloaded system,
+ * while the live pipeline contends with the EQ, the capture and the muted app's own decode.
  *
  * Threading: [push]/[popOutput]/[reset] are called from one audio thread; inference runs on its
  * own thread. Synchronization is a single lock guarding the frame counters (which publish the
@@ -32,6 +40,7 @@ class SpleeterStream private constructor(
     private val accompanimentSession: OrtSession,
     private val inputName: String,
     private val shape: LongArray,
+    private val adaptive: Boolean,
 ) {
     enum class Failure { MODEL, TOO_SLOW }
 
@@ -44,6 +53,16 @@ class SpleeterStream private constructor(
     var lagFrames = 0
         private set
 
+    /**
+     * Frames masked per inference pass. [configure] sets the starting value before [start];
+     * afterwards the inference loop adapts it to the observed capture lag (see class doc).
+     */
+    @Volatile
+    private var advance = KaraokeDsp.ADVANCE
+
+    /** Current batch size in frames; moves as the inference loop adapts. */
+    val advanceFrames: Int get() = advance
+
     companion object {
         /** Complex-spectrum ring slots; masks a frame at most ~100 frames after capture, so 256 gives seconds of slack. */
         private const val COMPLEX_RING = 256
@@ -51,10 +70,17 @@ class SpleeterStream private constructor(
         private const val MAG_RING = KaraokeDsp.WINDOW + 128
         /** Capture lead over masking beyond which the device is declared too slow (≈3.7 s). */
         private const val LAG_LIMIT = 160
+        /** Smallest batch the loop adapts down to (≈186 ms of audio); the service's choices match. */
+        private const val MIN_ADVANCE = 8
+        /** Caught-up passes before the batch is halved; 4 keeps the latency win near-term. */
+        private const val STABLE_PASSES = 4
+        /** Lag (frames) over one batch that marks the device as falling behind — enlarge the batch. */
+        private const val LAG_RECOVER = 24
         private const val EPS = 1e-10f
+        private const val TAG = "Karaoke"
 
         /** Loads both models and returns an idle stream; throws when they can't be opened. */
-        fun open(vocalsPath: String, accompanimentPath: String, threads: Int): SpleeterStream {
+        fun open(vocalsPath: String, accompanimentPath: String, threads: Int, adaptive: Boolean = true): SpleeterStream {
             val env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
                 try {
@@ -74,7 +100,7 @@ class SpleeterStream private constructor(
                 require(shape.size == 4 && shape[0] == 2L && shape[2] == KaraokeDsp.WINDOW.toLong() && shape[3] == KaraokeDsp.MODEL_BINS.toLong()) {
                     "unexpected spleeter model input $shape"
                 }
-                return SpleeterStream(env, vocals, acc, vocals.inputNames.first(), shape)
+                return SpleeterStream(env, vocals, acc, vocals.inputNames.first(), shape, adaptive)
             } catch (t: Throwable) {
                 try { opts.close() } catch (_: Throwable) {}
                 throw t
@@ -129,6 +155,33 @@ class SpleeterStream private constructor(
     }, "KaraokeInference").apply { isDaemon = true }
 
     fun start() { thread.start() }
+
+    /** Caller thread, before [start]: starting batch size in frames (1..WINDOW). */
+    fun configure(framesPerPass: Int) {
+        require(framesPerPass in 1..KaraokeDsp.WINDOW) { "advance must be in 1..${KaraokeDsp.WINDOW}, got $framesPerPass" }
+        advance = framesPerPass
+    }
+
+    /**
+     * Caller thread, before [start]: median seconds for one full pass (both models) on silent
+     * input, after warm-up — measures the device so the service can size batches and buffers.
+     */
+    fun benchmark(warmupPasses: Int = 1, timedPasses: Int = 2): Double {
+        java.util.Arrays.fill(netIn, 0f)
+        repeat(warmupPasses) { pass() }
+        val times = DoubleArray(timedPasses) {
+            val t0 = System.nanoTime()
+            pass()
+            (System.nanoTime() - t0) / 1e9
+        }
+        return times.sorted()[times.size / 2]
+    }
+
+    private fun pass() {
+        runModel(vocalsSession, netVocals)
+        runModel(accompanimentSession, netAccomp)
+        if (failure != null) throw IllegalStateException("spleeter inference failed")
+    }
 
     /** Audio thread: captured interleaved stereo samples; full hops are analyzed, the tail carried. */
     fun push(interleaved: FloatArray, frames: Int) {
@@ -242,31 +295,33 @@ class SpleeterStream private constructor(
     private fun inferLoop() {
         while (true) {
             val target: Int
+            val adv: Int
             val myEpoch: Int
             synchronized(lock) {
-                while (running && failure == null && stftCount < maskedCount + KaraokeDsp.ADVANCE) lock.wait()
+                while (running && failure == null && stftCount < maskedCount + advance) lock.wait()
                 if (!running) return
                 if (failure != null) return
                 target = maskedCount
+                adv = advance
                 myEpoch = epoch
             }
-            if (runBatch(target, myEpoch)) return
+            if (runBatch(target, adv, myEpoch)) return
         }
     }
 
     /**
-     * One inference pass masking frames [target, target+ADVANCE). Returns true when the loop
+     * One inference pass masking frames [target, target+adv). Returns true when the loop
      * must stop (stopped/failed/superseded); a stale pass leaves no trace.
      */
-    private fun runBatch(target: Int, myEpoch: Int): Boolean {
-        // Assemble [2, 1, WINDOW, MODEL_BINS] magnitudes: window frames target-448 .. target+63,
-        // zero-padded before the stream start.
+    private fun runBatch(target: Int, adv: Int, myEpoch: Int): Boolean {
+        // Assemble [2, 1, WINDOW, MODEL_BINS] magnitudes: window frames target-(WINDOW-adv)
+        // .. target+adv-1, zero-padded before the stream start.
         java.util.Arrays.fill(netIn, 0f)
         for (ch in 0..1) {
             val m = mags[ch]
             val base = ch * KaraokeDsp.WINDOW
             for (w in 0 until KaraokeDsp.WINDOW) {
-                val src = target - (KaraokeDsp.WINDOW - KaraokeDsp.ADVANCE) + w
+                val src = target - (KaraokeDsp.WINDOW - adv) + w
                 if (src < 0) continue
                 System.arraycopy(m, src % MAG_RING * KaraokeDsp.MODEL_BINS, netIn, (base + w) * KaraokeDsp.MODEL_BINS, KaraokeDsp.MODEL_BINS)
             }
@@ -275,11 +330,42 @@ class SpleeterStream private constructor(
         synchronized(lock) {
             if (!running || failure != null) return true
             if (epoch != myEpoch) return false // reset mid-run: results are stale, keep looping
-            applyMasks(target)
-            maskedCount = target + KaraokeDsp.ADVANCE
+            applyMasks(target, adv)
+            maskedCount = target + adv
             lagFrames = stftCount - maskedCount
+            if (adaptive) adaptAdvance(lagFrames)
         }
         return false
+    }
+
+    /** Consecutive fully caught-up passes; guarded by [lock]. */
+    private var stablePasses = 0
+
+    /**
+     * Keeps [advance] matched to what the device actually sustains while playing (lock held):
+     * enlarge the batch as soon as the capture lead grows past one batch (the startup benchmark
+     * measured an unloaded system), halve it after [STABLE_PASSES] passes with ≥25% spare
+     * capacity. The lag guard still fails the stream only when even [KaraokeDsp.ADVANCE]
+     * can't keep up.
+     */
+    private fun adaptAdvance(lag: Int) {
+        if (lag >= advance + LAG_RECOVER) {
+            if (advance < KaraokeDsp.ADVANCE) {
+                val old = advance
+                advance = minOf(KaraokeDsp.ADVANCE, advance * 2)
+                try { android.util.Log.d(TAG, "batch $old->$advance (lag $lag)") } catch (_: Throwable) {}
+            }
+            stablePasses = 0
+        } else if (lag * 4 <= advance * 3 && advance > MIN_ADVANCE) {
+            if (++stablePasses >= STABLE_PASSES) {
+                val old = advance
+                advance /= 2
+                try { android.util.Log.d(TAG, "batch $old->$advance (lag $lag)") } catch (_: Throwable) {}
+                stablePasses = 0
+            }
+        } else {
+            stablePasses = 0
+        }
     }
 
     private fun runModel(session: OrtSession, out: FloatArray): Boolean {
@@ -299,14 +385,14 @@ class SpleeterStream private constructor(
         }
     }
 
-    /** Apply the accompaniment mask to the ring slots of frames [target, target+ADVANCE). Lock held. */
-    private fun applyMasks(target: Int) {
+    /** Apply the accompaniment mask to the ring slots of frames [target, target+adv). Lock held. */
+    private fun applyMasks(target: Int, adv: Int) {
         val win = KaraokeDsp.WINDOW
         val mb = KaraokeDsp.MODEL_BINS
-        for (j in 0 until KaraokeDsp.ADVANCE) {
+        for (j in 0 until adv) {
             val f = target + j
             val slot = f % COMPLEX_RING
-            val w = win - KaraokeDsp.ADVANCE + j // this frame's row in the inference window
+            val w = win - adv + j // this frame's row in the inference window
             var ch = 0
             while (ch <= 1) {
                 val vo = ch * win * mb + w * mb

@@ -495,6 +495,13 @@
     <string name="karaoke_download_body">Karaoke needs a one-time ~40 MB download (Spleeter 2-stems model, MIT license). Download it now?</string>
     <string name="karaoke_download_progress">Downloading… %1$d%%</string>
     <string name="karaoke_download_failed">Model download failed (%1$s)</string>
+    <!-- Shizuku (optional, https://shizuku.rikka.app): full session discovery on
+         ROMs where the direct audio dump is denied (e.g. Samsung One UI) -->
+    <string name="shizuku_status_off">Session discovery: Shizuku off</string>
+    <string name="shizuku_status_ungranted">Session discovery: Shizuku needs permission</string>
+    <string name="shizuku_status_active">Session discovery: Shizuku active</string>
+    <string name="shizuku_get">Get Shizuku</string>
+    <string name="shizuku_allow">Allow</string>
     <string name="download">Download</string>
     <plurals name="n_targets">
         <item quantity="one">%1$d target</item>

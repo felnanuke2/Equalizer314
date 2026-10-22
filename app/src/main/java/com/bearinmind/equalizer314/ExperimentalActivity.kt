@@ -27,6 +27,7 @@ class ExperimentalActivity : AppCompatActivity() {
         setupTvMode()
         setupVirtualSurround()
         setupKaraoke()
+        setupShizuku()
 
         // Hide the legacy "Experimental DP Engine" switch row; the view stays so the card structure holds.
         findViewById<android.view.View>(R.id.expDpModeSwitch)
@@ -1044,8 +1045,72 @@ class ExperimentalActivity : AppCompatActivity() {
         }
     }
 
+    // ---- Shizuku (optional): privileged dumpsys behind "Now playing" + karaoke muting ----
+
+    private val shizukuRequestCode = 1001
+
+    private val shizukuPermissionListener =
+        rikka.shizuku.Shizuku.OnRequestPermissionResultListener { requestCode, _ ->
+            if (requestCode == shizukuRequestCode) syncShizuku()
+        }
+
+    private fun setupShizuku() {
+        findViewById<com.google.android.material.button.MaterialButton>(R.id.expShizukuButton)
+            .setOnClickListener {
+                if (shizukuRunning()) {
+                    try { rikka.shizuku.Shizuku.requestPermission(shizukuRequestCode) } catch (_: Exception) {}
+                } else {
+                    // Not installed or not running: send the user to the setup site.
+                    try {
+                        startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("https://shizuku.rikka.app")
+                            )
+                        )
+                    } catch (_: Exception) {}
+                }
+                syncShizuku()
+            }
+        syncShizuku()
+    }
+
+    /** Server up but grant pending → "Allow"; every Shizuku call can throw when its binder dies. */
+    private fun shizukuRunning(): Boolean = try {
+        rikka.shizuku.Shizuku.getBinder() != null
+    } catch (_: Throwable) { false }
+
+    private fun shizukuGranted(): Boolean = try {
+        rikka.shizuku.Shizuku.getBinder() != null &&
+            rikka.shizuku.Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
+    } catch (_: Throwable) { false }
+
+    private fun syncShizuku() {
+        val status = findViewById<android.widget.TextView>(R.id.expShizukuStatus)
+        val button = findViewById<com.google.android.material.button.MaterialButton>(R.id.expShizukuButton)
+        when {
+            shizukuGranted() -> {
+                status.text = getString(R.string.shizuku_status_active)
+                button.visibility = android.view.View.GONE
+            }
+            shizukuRunning() -> {
+                status.text = getString(R.string.shizuku_status_ungranted)
+                button.visibility = android.view.View.VISIBLE
+                button.text = getString(R.string.shizuku_allow)
+            }
+            else -> {
+                status.text = getString(R.string.shizuku_status_off)
+                button.visibility = android.view.View.VISIBLE
+                button.text = getString(R.string.shizuku_get)
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        try {
+            rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        } catch (_: Throwable) {}
         androidx.core.content.ContextCompat.registerReceiver(
             this, vsStateReceiver,
             android.content.IntentFilter().apply {
@@ -1056,10 +1121,12 @@ class ExperimentalActivity : AppCompatActivity() {
         )
         syncVirtualSurround()
         syncKaraoke()
+        syncShizuku()
     }
 
     override fun onPause() {
         super.onPause()
+        try { rikka.shizuku.Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener) } catch (_: Throwable) {}
         try { unregisterReceiver(vsStateReceiver) } catch (_: Exception) {}
         // Leaving with TV Mode armed but nothing connected is accidental — reset to Off; a live link survives.
         val hub = com.bearinmind.equalizer314.remote.TvRemoteHub

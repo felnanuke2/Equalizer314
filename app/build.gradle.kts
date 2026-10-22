@@ -104,6 +104,16 @@ dependencies {
     // model (sherpa-onnx fp16 port, MIT) on-device. Apache 2.0, GPL-compatible.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
+    // Shizuku client (https://shizuku.rikka.app): optional privileged transport
+    // for AudioPolicyDumpParser — when a ROM (e.g. Samsung One UI) denies the
+    // direct binder dump, the same dumpsys runs as the shell user through the
+    // local Shizuku binder. Apache-2.0, tiny jars, no network code.
+    // api+aidl: binder interface; provider: the component the Shizuku manager
+    // binds to deliver that binder into our process.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:aidl:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+
     // (Removed unused androidx.media3-exoplayer/ui/session dependencies.
     // They were an artefact of an earlier capture-based design that
     // never shipped. The current implementation uses Android's native

@@ -54,6 +54,12 @@
          path (package name without session ID). -->
     <uses-permission android:name="android.permission.DUMP"
         tools:ignore="ProtectedPermissions" />
+    <!-- Shizuku (https://shizuku.rikka.app), optional: when granted, lets
+         AudioPolicyDumpParser run its dumpsys through Shizuku's
+         shell-privileged binder on ROMs that deny the direct dump
+         (Samsung One UI). Without it, behavior is unchanged. The runtime
+         permission is declared by the Shizuku manager app (API_V23). -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <application
         android:name="com.bearinmind.equalizer314.EqApp"
@@ -283,6 +289,19 @@
                 android:name="autoStoreLocales"
                 android:value="true" />
         </service>
+
+        <!-- Entry point for the Shizuku binder: when our process starts, the
+             Shizuku server (adb/root) pushes its binder through this provider.
+             INTERACT_ACROSS_USERS_FULL is held by shell but not by normal
+             apps, so exported=true is only usable by the server itself.
+             Required declaration per ShizukuProvider's docs (not merged in
+             from the library manifest). -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
     </application>
 

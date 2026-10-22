@@ -58,8 +58,13 @@ object AudioPolicyDumpParser {
         return resolveUidsToPackages(context, uidToSessions)
     }
 
-    /** Dump [service] via dumpAsync, feeding each line to [onLine] until EOF or [timeoutMs]; null when the binder is missing or the dump was refused. */
-    private fun streamDump(service: String, timeoutMs: Long, onLine: (String) -> Unit): Unit? {
+    /** Dump [service] via dumpAsync; on refusal (One UI denies the audioserver dump to app binders, but the shell user can always read it) the same dump retries through Shizuku. Null when both transports fail. */
+    private fun streamDump(service: String, timeoutMs: Long, onLine: (String) -> Unit): Unit? =
+        streamDumpDirect(service, timeoutMs, onLine)
+            ?: ShizukuShell.dumpService(service, timeoutMs, onLine)
+
+    /** Direct dumpAsync pipe: feeds each line to [onLine] until EOF or [timeoutMs]; null when the binder is missing or the dump was refused. */
+    private fun streamDumpDirect(service: String, timeoutMs: Long, onLine: (String) -> Unit): Unit? {
         val binder = obtainBinder(service) ?: return null
         val pipe = ParcelFileDescriptor.createPipe()
         val readFd = pipe[0]
